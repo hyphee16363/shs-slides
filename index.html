@@ -24,102 +24,191 @@
           data-background-video="shs_assets/s00_c7b7dbcfeb2feb02.mp4"
           data-background-video-muted
           >
+            <aside class="notes" data-markdown>
+大家好，今天報告的是 **Semantic Head Specialization Guides Hybrid ViT Attention for Multimodal LLMs**。
+作者來自北大、港大和小米 LLM-Core。
+
+一句話總結：他們發現 full-attention ViT 的 attention heads 會自然分工成「看物體」和「看背景」兩種角色，
+用這個現象當作診斷指標，設計出一個接近 full attention 品質、但便宜很多的 hybrid attention。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s01_cae1aef23a82ebed.mp4"
           >
+            <aside class="notes" data-markdown>
+先從 **Vision Transformer (ViT)** 講起。多模態 LLM（像 Qwen-VL、InternVL）裡，圖片會先經過一個 ViT 變成一串 visual tokens，再丟給 LLM。
+
+第一步：把圖片切成固定大小的 patch（本篇 Qwen2.5-VL 風格是 14×14 pixels）。每個 patch 之後就是一個 token。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s01_292504c1987afa3e.mp4"
           >
+            <aside class="notes" data-markdown>
+第二步：把 2D 的 patch grid 攤平成一條 **1D token 序列**（這裡用 raster scan，一行一行掃）。
+每個 patch 經過一個 linear layer 變成向量，再加上 2D 位置編碼（本篇是 2D RoPE）。
+
+先記住「2D 怎麼攤成 1D」這件事 —— 後面 Factor 2 會發現這個順序對 local attention 很重要。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s01_41cebb4da542341e.mp4"
           >
+            <aside class="notes" data-markdown>
+第三步：這串 tokens 進入 ViT encoder：32 層 transformer layer，每層是 **Self-attention**（token 之間交換資訊）+ **MLP**（每個 token 各自運算）。
+
+**Self-attention 是唯一讓不同 token 互相溝通的地方**，本篇所有實驗只改這一塊。
+
+ViT 輸出後，每 2×2 個 token 合併、經過 projector，變成 LLM 看得懂的 visual tokens，和文字 prompt 一起送進 LLM（本篇用 Qwen2-0.5B）。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s01_e11fe37a4b9968b5.mp4"
           >
+            <aside class="notes" data-markdown>
+為什麼 attention 的成本是重點？token 數量隨解析度 **平方** 成長，full attention 的成本又是 token 數的平方。
+448² 只有 1,024 tokens；896² 是 4,096；1792² 已經 16,384 tokens。
+Attention FLOPs（論文 appendix 的數字）從 0.69T → 11.0T → 175.9T。這就是為什麼大家想要更便宜的 attention。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s02_ca00432f375ac795.mp4"
           >
+            <aside class="notes" data-markdown>
+**Self-attention** 怎麼運作：每個 token x_i 經過三個線性層得到 **query q、key k、value v**。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s02_d81c610746332f01.mp4"
           >
+            <aside class="notes" data-markdown>
+以 token 3 當 query：拿 q₃ 和**每一個** key 做內積（再除以 √d），經過 **softmax** 變成權重 a₃ⱼ（加總 = 1）。
+權重高代表 token 3 比較「注意」token j。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s02_6c67bed000ea7881.mp4"
           >
+            <aside class="notes" data-markdown>
+輸出是 value 的加權平均：z₃ = Σ a₃ⱼ vⱼ。這樣 token 3 就把其他 token 的資訊「混」進來了。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s02_f97f473b81ea43c1.mp4"
           >
+            <aside class="notes" data-markdown>
+每個 token 都當一次 query，所有權重排起來就是一個 **N × N 的 attention matrix**（每一 row 加總 = 1）。
+
+而且每層有 **16 個 heads**，每個 head 有自己的 W_Q、W_K、W_V，所以會學出不同的 attention pattern。
+本篇的核心觀察就是：這些 heads 會各自「分工」—— 這就是後面的 Semantic Head Specialization。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s02_be9fd5343211da32.mp4"
           >
+            <aside class="notes" data-markdown>
+成本：N×N 的矩陣，896² 時 N = 4,096 → 每個 head、每層約 1,680 萬個分數，再乘上 16 heads × 32 layers。
+所以下一步自然的想法：**限制每個 query 能看到哪些 key** —— 也就是 local / hybrid attention。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s03_e556d3957835ea08.mp4"
           >
+            <aside class="notes" data-markdown>
+剛剛的 self-attention 是 **full attention**：每個 query 看全部 key。降低成本的做法是限制 query i 能看到的 key 集合 𝒩(i)，用 mask 表示。
+
+每張圖是 attention mask：橫軸是 key、縱軸是 query，著色的格子代表「這個 query 可以看這個 key」。
+**Full attention**：全部都著色，每個 token 看所有 token。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s03_d811e8129469c77d.mp4"
           >
+            <aside class="notes" data-markdown>**Chunk window**：把 1D 序列切成不重疊的 chunk，每個 token 只看自己 chunk 裡的 token（mask 是一塊一塊的 block）。</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s03_5eb6e39d384f1bc8.mp4"
           >
+            <aside class="notes" data-markdown>**Sliding window (SWA)**：每個 token 看自己左右各幾個 token，mask 是一條斜帶；相鄰 token 的 window 互相重疊。
+
+注意 chunk 和 SWA 都作用在 **1D 序列** 上，所以 2D 影像怎麼攤平（serialization）會很重要，後面會講。</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s04_9c1e37075f29c489.mp4"
           >
+            <aside class="notes" data-markdown>
+**動機**：LLM 端，hybrid attention 已經是主流 —— GPT-OSS、Gemma 3 都是 local（sliding window）和 full attention 交錯，
+品質幾乎不掉、成本大幅下降。
+
+但在 MLLM 的 ViT 端情況不一樣：Qwen2.5-VL 用 chunk window（把 token 切成不重疊的 window，只在 window 內做 attention）+ 4 層 full；
+到了 Qwen3-VL 反而退回全部 full attention。代表目前 ViT 的 hybrid 設計沒有令人滿意的答案。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s04_61904ce95449f6b5.mp4"
           >
+            <aside class="notes" data-markdown>
+ViT 這邊：Qwen2.5-VL 的 chunk window hybrid 是目前最主要被部署的 ViT hybrid baseline；
+但更新、更強的 Qwen3-VL encoder 回到了 full attention。這個 quality gap 就是本篇要回答的問題。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s04_c24fb461897346a1.mp4"
           >
+            <aside class="notes" data-markdown>
+所以核心問題：**full attention 保留了什麼，是 chunk-window hybrid 弄丟的？**
+
+作者不從 benchmark 分數下手，而是直接去看 attention heads 內部怎麼組織視覺資訊。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s05_51476528daebd2b1.mp4"
           >
+            <aside class="notes" data-markdown>
+**Related work：視覺上的高效 attention**。每個小圖是 8×8 的 token grid，藍色是 query，著色的是它能看到的 key。
+
+- **Swin**：固定 window，下一層把 window 位移（shifted window）讓資訊跨 window 流動。
+- **Axial / CSWin**：只看同一行、同一列（或條狀區域）。
+- **NAT**：以每個 token 為中心的 2D 鄰域 —— 最接近「2D 的 sliding window」，但需要特製 kernel。
+- **MaxViT**：局部 block + 稀疏的全域 grid。
+- **Vision Mamba / VMamba**：state-space model，把 2D 掃成 1D，發現 **掃描順序很重要** —— 跟本篇 Factor 2 是同一個觀察。
+- **Ariadne**：1D sliding window，在 row-major 和 column-major 之間交替。在 2D 上看起來像「水平條 + 垂直條」，和 axial / CSWin 很像。
+
+作者自己承認：Ariadne 功能上跟 axial/stripe attention 相近，差別在 overlapping window、block 式 row/col 排程（為了 fused kernel 效率）。
+**本篇主要貢獻是 SHS 這個診斷工具，不是新的 attention primitive。**
+</aside>
         </section>
         <section
           data-background-size='contain'
@@ -132,90 +221,163 @@
           data-background-color="white"
           data-background-video="shs_assets/s06_2228b407e3086ff9.mp4"
           >
+            <aside class="notes" data-markdown>
+**控制實驗設計**：為了讓 attention operator 成為唯一變因，他們從頭訓練兩個 32 層 ViT：
+- Model A：全部 full attention
+- Model B：Qwen2.5-VL 風格，第 7/15/23/31 層（0-indexed）是 full，其餘 28 層換成 chunk window
+
+之後所有變體（總共 9 種 configuration）都只改這 28 層 local layer 的 attention 結構。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s06_3caaa577aa6e2b8d.mp4"
           >
+            <aside class="notes" data-markdown>
+訓練設定：ViT random init、LLM 用 **Qwen2-0.5B**、資料 Cambrian-10M、10k steps、batch 2048，大約 10 萬 Hopper GPU-hours。
+
+**刻意用小 LLM**：Cambrian 的觀察是強 LLM 會當作 shortcut，掩蓋 vision encoder 的缺陷；小 LLM 逼 ViT 自己學好表徵，架構差異更明顯。
+
+評測 22 個 benchmark（20 image + 2 video），primary checkpoint 是 8k step。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s07_df0e4eb2fc9a7ed7.mp4"
           >
+            <aside class="notes" data-markdown>
+在看結果之前，先定義本篇怎麼衡量「一個 head 有多注意某個 token」。
+
+先回顧 **𝒩(i)**：query i「被允許看」的 key 集合 —— Full attention 是全部 token；Chunk window 是自己 chunk 裡的 token；
+Sliding window 是自己左右各 l、r 個鄰居。softmax 只在 𝒩(i) 裡面做，所以每個 query 分出去的權重加總 = 1。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s07_3daafc349aee3102.mp4"
           >
+            <aside class="notes" data-markdown>
+本篇衡量 token 重要性的方式是 **received attention**：把 attention matrix 的 **column** 加起來。
+
+每個 row（query）因為 softmax 加總是 1；但每個 column 加總不一樣 —— 代表 token j 從所有能看到它的 query 那裡「收到多少票」。
+r_h(j) 越大，表示 head h 越關注 token j。後面所有熱圖和 SHS-Index 都是基於這個量。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s08_267e9096b1b2a857.mp4"
           >
+            <aside class="notes" data-markdown>
+把每個 head 的 received attention 畫成熱圖（越亮 = 這個 token 收到越多 attention）。
+左邊是 COCO 的輸入圖，接著比較 Full attention 和 Chunk window 在第 11 層的一個代表性 head。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s08_4dddea4acc26452b.mp4"
           >
+            <aside class="notes" data-markdown>
+**Full attention**（第 11 層的一個 head）：高 received attention 集中在狗和球上 —— 它是 **object-specialist**。
+其他 head 則會集中在背景上。重點不是 map 長得不一樣，而是 heads 形成了一致的語意角色分工。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s08_fed0b67dc4b0b282.mp4"
           >
+            <aside class="notes" data-markdown>
+**Chunk window**：出現明顯的格狀 artifact（window 邊界），不同 head 看起來都差不多，沒有區分前景/背景。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s08_c47c9b49ff25f078.mp4"
           >
+            <aside class="notes" data-markdown>
+作者把這個現象命名為 **Semantic Head Specialization (SHS)**：heads 依照影像的語意區域分工，最明顯的是 object 和 background 兩種角色。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s08_ee72b6f413fdcf04.mp4"
           >
+            <aside class="notes" data-markdown>
+這不是單張圖的巧合：同一個 head 在所有分析圖上都維持一致的 FG 或 BG 偏好；
+在單物體、多物體、複雜背景、互相遮擋的場景都成立。這裡是另外四張圖在 L17 的比較。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s09_1460a2177263336c.mp4"
           >
+            <aside class="notes" data-markdown>
+想知道 attention head 有沒有在「分辨物體和背景」，第一步要先把每個 token 標成 **前景 (FG)** 或 **背景 (BG)**：
+用 COCO segmentation mask，看每個 patch 裡哪個區域佔多數；跨越邊界的 patch 直接排除。
+接下來先看實際的熱圖，再把觀察量化。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s09_92b594762aa13f40.mp4"
           >
+            <aside class="notes" data-markdown>
+用真的圖來看：左邊是狗的 FG/BG mask（藍 = 物體 token，綠 = 背景 token），右邊是第 17 層同一個代表性 head 的 received attention。
+- Full attention：亮的 token 大多落在 mask 的藍色區域 → 很容易把 FG 和 BG 分開。
+- Chunk window：亮點散在整張圖、還有格狀 artifact → 用 received attention 很難分出 FG / BG。
+
+下一步就是把「分得多開」變成一個數字：AUROC。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s10_d3be47f67b89d1d2.mp4"
           >
+            <aside class="notes" data-markdown>
+對每個 head、每張圖，把 FG tokens 和 BG tokens 的 received attention 拿來算 **AUROC**：
+隨機抽一個 FG token 和一個 BG token，FG 的分數比較高的機率。
+
+- 接近 1 → foreground specialist
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s10_57b2b800ff0b3696.mp4"
           >
+            <aside class="notes" data-markdown>- 接近 0 → background specialist</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s10_9bdfc063b1a6f7ab.mp4"
           >
+            <aside class="notes" data-markdown>- 接近 0.5 → 這個 head 沒有區分前景/背景</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s10_63451d6b81da8580.mp4"
           >
+            <aside class="notes" data-markdown>
+因為 FG-specialist 和 BG-specialist **都算是專精**，所以取 max(AUROC, 1−AUROC)，把 [0,1] 對折到 [0.5,1]：
+0.5 = 沒有分工，1 = 完全分工。
+
+**SHS-Index** = 對圖片、layer、head 取平均。
+
+在控制實驗上：Full 0.606、Chunk 0.577。
+（小提醒：數值看起來差很少，但因為下限是 0.5，應該看「超過 0.5 的部分」：0.106 vs 0.077，大約差 38%。這是我自己的解讀。）
+</aside>
         </section>
         <section
           data-background-size='contain'
@@ -228,30 +390,70 @@
           data-background-color="white"
           data-background-video="shs_assets/s11_c241bff3f1ce8375.mp4"
           >
+            <aside class="notes" data-markdown>
+SHS-Index 是否能推廣到現成的模型？他們測了 **16 個 open-source visual encoder / VLM**：
+11 個 full attention（InternVL、Qwen3-VL、SigLIP2、DINOv2/v3 …）、5 個 chunk window（Qwen2.5-VL 系列、MiMo-VL）。
+
+結果兩群 **完全不重疊**：full 最低 0.610，chunk 最高 0.586。
+DINOv2/v3 完全沒跟語言模型一起訓練，也一樣高 → 不是 VLM training 特有的現象。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s11_b13497260a7b9fa7.mp4"
           >
+            <aside class="notes" data-markdown>
+更漂亮的證據：Qwen2.5-VL 3B / 7B / 32B / 72B 用的是 **同一個 ViT**，只是接不同大小的 LLM，SHS-Index 差不到 0.002。
+所以這個訊號來自 ViT 的 attention 設計，而不是 LLM 的規模。
+
+注意：這 16 個模型的資料、recipe 都不同，所以作者 **不** 拿它們算 benchmark correlation，只用來證明 full vs chunk 的結構性分離。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s12_7c925757ffbcbcf0.mp4"
           >
+            <aside class="notes" data-markdown>
+在講三個因素之前，先回顧兩種 local attention：
+
+- **Chunk window**（Qwen2.5-VL）：把 1D token 序列切成不重疊的 chunk（每個 C 個 token），每個 token 只看自己 chunk 裡的 token。
+  attention mask 是一塊一塊的 block-diagonal；chunk 之間在這一層完全不交流（只能靠那 4 層 full attention）。
+- **Sliding window (SWA)**：每個 token 看自己左邊 l 個、右邊 r 個 token，mask 是一條斜帶。
+  每個 token 的 window 都不一樣、而且互相重疊，所以資訊可以一層一層往外傳。
+
+兩者都是在 **1D 序列** 上定義的，所以 2D 影像怎麼排成 1D 也會影響結果（Factor 2）。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s12_194ae2b73137a182.mp4"
           >
+            <aside class="notes" data-markdown>
+有了 SHS-Index 當量尺，下一步：**哪些結構設計造成了 SHS gap？** 目的是把它們變成設計 hybrid 的原則。
+
+三個因素：
+1. Window interaction —— chunk 之間完全隔離
+2. Token serialization —— 2D 影像怎麼攤成 1D 序列
+3. Local softmax allocation —— local window 裡 softmax 被迫把 mass 分給背景
+
+所有比較都固定 32 層 ViT、資料、recipe 和 4 層 full anchor，只改剩下 28 層。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s13_58d8914540272574.mp4"
           >
+            <aside class="notes" data-markdown>
+**Factor 1**：chunk window 把 token 切成不重疊的 chunk，一個 query 只能看自己 chunk 裡的 token。
+如果 SHS 需要 head 比較「物體 vs 背景」跨區域的證據，那 chunk 隔離就是一個問題。
+
+控制實驗：保留 Qwen2.5-VL 原本的 2D block layout，只把 operator 從 chunk 換成 **sliding window (SWA)**。
+SWA 的 window 以每個 token 為中心，所以會跨過 chunk 邊界。
+</aside>
         </section>
         <section
           data-background-size='contain'
@@ -264,42 +466,70 @@
           data-background-color="white"
           data-background-video="shs_assets/s13_dbd105bf7369d25e.mp4"
           >
+            <aside class="notes" data-markdown>
+更重要的是跨層傳播：chunk 的 receptive field 永遠被鎖在同一個 chunk（只能靠 4 層 full layer 打破）；
+SWA 每過一層就往外擴 ±w，資訊可以沿著重疊的 window 傳到很遠的區域。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s13_0af7b23c8eb6be93.mp4"
           >
+            <aside class="notes" data-markdown>
+結果：SHS-Index 從 **0.577 → 0.588**。
+物理上也可以驗證：attention distance（ViT 論文定義的，attention 加權後的平均空間距離）從 10.69 → 11.80。
+
+**結論 1**：chunk 隔離是 SHS gap 的來源之一；好的 hybrid 應該讓資訊能自由跨過 window 邊界。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s14_c368b37863b155d5.mp4"
           >
+            <aside class="notes" data-markdown>
+**Factor 2 的背景**：SWA 作用在 1D sequence 上，所以要決定 2D patch grid 怎麼攤平。
+這裡是 4×8 的 patch grid，粗框是 2×2 block（Qwen2.5-VL 會把 2×2 patch 合成一個 block 當最小單位）。
+格子裡的數字 = 它在 1D sequence 裡的位置，線 = 序列走的路徑。
+
+(a) Raster scan：一行一行掃。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s14_5c667133399c03bd.mp4"
           >
+            <aside class="notes" data-markdown>(b) Qwen2.5-VL 的 chunk window 順序：先把 window 0 的 block 走完才進 window 1。紅虛線是 window 邊界 —— 注意 token 15 和 16 在空間上相鄰，但分在不同 window。</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s14_6b819b44fe056360.mp4"
           >
+            <aside class="notes" data-markdown>(c) Row-major：block 從左到右、從上到下排 —— 相鄰序列位置大致對應相鄰影像區域。這就是 SWA-1D。</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s14_c07c91fd2a1c94f6.mp4"
           >
+            <aside class="notes" data-markdown>(d) Column-major：block 從上到下、從左到右。Ariadne 會交替使用 (c) 和 (d)。</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s15_a103d0aa20a9c110.mp4"
           >
+            <aside class="notes" data-markdown>
+**Factor 2**：把 SWA 直接套在 chunk-2D 的順序上會出問題。
+左邊：anchor 是 token 15，sliding window 取序列前後各 8 個（7–23）。
+7–14 在空間上確實是鄰居（綠），但 16–23 被跳到 window 1 的**上半部**（紅），空間上很遠。
+一個 local window 同時混了近的和遠的 token。
+
+右邊：row-major 1D 順序，anchor 是 token 23，window 15–31 幾乎都落在周圍的行，形成一個空間連續的鄰域。
+</aside>
         </section>
         <section
           data-background-size='contain'
@@ -312,132 +542,285 @@
           data-background-color="white"
           data-background-video="shs_assets/s15_80aea01a5bda796b.mp4"
           >
+            <aside class="notes" data-markdown>
+控制實驗：固定 SWA operator，只把順序從 chunk-2D 換成 row-major 1D（SWA-1D）。
+SHS-Index **0.588 → 0.600**，20-image benchmark 38.09 → 38.80。
+
+有趣的是 appendix 的分析：這一步 entropy（+0.10）和 attention distance（−0.09）幾乎沒變，**只有 SHS 上升**。
+也就是說改善不是來自「看得更遠」或「更尖銳」，而是空間連續性讓 head 能做更有意義的分工 —— 這也是作者說 SHS 比 entropy/distance 更有資訊量的論據。
+
+**結論 2**：SWA 的序列化必須保持空間上連續的鄰域。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s16_07b7e2fec2fb8cc8.mp4"
           >
+            <aside class="notes" data-markdown>
+**Factor 3**：即使解決了前兩個問題，local attention 裡每個 query 仍只能看一小部分 token（例如 128 個）。
+
+先看 softmax 之前的「原始分數」：
+- 左邊的 query，window 裡有物體：物體 token 的分數很高。
+- 右邊的 query，window 裡全是背景：每個分數都很弱 —— 它其實什麼都不想看。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s16_9216d3e995e3942e.mp4"
           >
+            <aside class="notes" data-markdown>
+softmax 規定每個 query 的權重加總必須是 1。
+- 左邊：本來就有很強的物體分數，正規化後大部分 mass 還是在物體上，沒問題。
+- 右邊：分數都很弱，本來「什麼都不想看」—— 但正規化後每個背景 token 都被放大到 1/8，**整份 attention 被迫分給沒資訊的背景**。
+沒有 sink 時，這個 query 沒有辦法說「我不想看任何東西」。這就是為什麼需要 sink。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s16_cae76436d48672de.mp4"
           >
+            <aside class="notes" data-markdown>
+**為什麼需要 sink？其他人怎麼處理這種「多出來的 attention」：**
+- LLM 裡（StreamingLLM, Xiao et al. 2024）：很多 head 會把大量 attention 丟給第一個 token，當成「垃圾桶」（attention sink）。
+- ViT 裡（Registers, Darcet et al. 2024）：大型 ViT 會在背景 patch 上長出高範數的「異常 token」來做同樣的事；解法是多加幾個 register token。
+- 本篇（和 GPT-OSS 一樣）：不加 token，而是每個 head 一個可學的 scalar s_aux，加在 softmax 分母，像一個 **沒有 value 的虛擬 key**：被分到的 mass 直接消失。FlashAttention-3 原生支援、零成本。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s16_b956ec765e5aef99.mp4"
           >
+            <aside class="notes" data-markdown>
+把 sink 寫進公式（論文 Eq. 1）：
+- **藍色**是原本的 softmax（Slide 4）。
+- **橘色**是分母多加的一項 exp(s_aux)：每個 head 一個可學的 logit，沒有對應的 token、也沒有 value。
+s_aux = −∞ 時就退回原本的 softmax；s_aux 越大，被吸走的 mass 越多。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s16_199697fad3fd1a4d.mp4"
           >
+            <aside class="notes" data-markdown>把 softmax 展開：分子是 query i 對 key j 的分數，分母把所有看得到的 key 加總（藍色）。</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s16_b850728ff8c3e3f5.mp4"
           >
+            <aside class="notes" data-markdown>在分母額外加上 sink 項 exp(s_aux)（橘色）：每個 head 一個可學的 logit，沒有 token 也沒有 value。</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s16_62a439e0694da02e.mp4"
           >
+            <aside class="notes" data-markdown>
+加上 **sink bias**（分母多一項 exp(s_aux)）：它像一個虛擬 token，可以吸收多餘的 mass。
+左邊的 query 有很強的 FG logit，sink 只拿走一點點；
+右邊背景-only 的 query，大部分 mass 被 sink 吸走 → 背景 token 收到的 attention 大幅下降。
+
+注意 sink 對同一個 query 內的 token 是等比例縮小，但因為「背景 query」被吸得多，聚合起來 **背景被壓得比物體多**。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s16_ee883db8f2720364.mp4"
           >
+            <aside class="notes" data-markdown>
+實驗結果其實 **有好有壞**，作者也誠實列出：
+- Chunk-2D：.577 → .579 ↑
+- SWA-2D：.588 → .597 ↑
+- Full：.606 → .611 ↑
+- **SWA-1D：.600 → .598 ↓**（例外）
+
+但 allocation 分析支持 sink 的角色：在 SWA 模型裡 94–97% 的 heads 從背景偷走的比例比物體多 —— sink 是 **background suppressor**。
+Chunk+sink 只有 78%，方向性較弱。而且 FA3 的 s_aux 零額外成本。
+
+**結論 3**：local softmax 會浪費 attention 在沒資訊的 token 上，sink 提供了一個吸收管道，但對 SHS 的效果取決於周圍結構。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s17_5a787e22b4514142.mp4"
           >
+            <aside class="notes" data-markdown>
+根據三個原則設計 **Ariadne Attention**（名字取自希臘神話的阿莉雅德妮之線：SWA 像一條線，沿著 token 序列連續走過迷宮）。
+
+組成：
+1. SWA 取代 chunk（原則 1）
+2. 空間連續的 1D serialization（原則 2）
+3. per-head sink bias（原則 3）
+4. 新增：**row-major 與 column-major 交替**，讓 local window 在兩個影像維度都能傳播資訊。
+
+作者強調：Ariadne 是驗證 SHS 框架的設計，不是在宣稱一個新的 attention primitive。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s17_68b418a9fe59f0aa.mp4"
           >
+            <aside class="notes" data-markdown>
+具體架構：每個 8 層 block = 4 層 row-major SWA+sink、3 層 column-major SWA+sink、1 層 full attention anchor；重複 4 次 = 32 層。
+
+為什麼是 RRRR-CCC 而不是 RCRCRC？因為每換一次順序就要做一次 token re-permutation（memory-bound），
+block 式排法只需在 row/col 交界處重排。4:3 的比例作者說是實務上的調整，不是主要貢獻。
+
+Window w = 64 per side（總共 128 token context），跟 GPT-OSS 一樣。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s17_5f30543b8321192b.mp4"
           >
+            <aside class="notes" data-markdown>
+直接在這 32 層上看：從一個 token 出發，經過第一個 block 的 7 層 local attention 後，資訊能傳到影像的多少範圍？
+（簡化模擬：token 級、w = 4、10×14 的格子，數字只是示意。）
+
+- 前 4 層 row-major：資訊主要沿水平方向擴散（藍色）。
+- 後 3 層換成 column-major：沿垂直方向快速展開（橘色），第 7 層就覆蓋整張圖。
+（如果 7 層都用 row-major，同樣模擬只能覆蓋約 41%，可以口頭補充。）
+
+其他細節（口頭補充）：window w = 64 per side（128-token context，和 GPT-OSS 相同）；
+用 block 式 RRRR-CCC 而不是每層交替，是因為每換一次順序就要重排 token（memory-bound），只在交界處重排比較快；
+sink 用 FlashAttention-3 的 s_aux，不增加任何 visual token。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s18_74d2305a1cb6fb4c.mp4"
           >
+            <aside class="notes" data-markdown>
+把所有控制變體放在一起（總共 9 種，只差在 local attention 結構）。
+SHS-Index 從 chunk-2D 的 .577 一路升到 full+sink 的 .611。右邊是 20-image benchmark 平均。
+因為變體之間只有 attention 結構不同，SHS 的差異直接反映結構選擇對 head specialization 的影響。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s18_bcaab645c08b9b1c.mp4"
           >
+            <aside class="notes" data-markdown>
+SHS-Index 和 benchmark 的相關性：拿 8 個 diagnostic configuration（不含 Ariadne）在 8k checkpoint，
+SHS 和 22-task 平均的 **Pearson r = 0.858**（p = 0.006；exact permutation p = 0.008；bootstrap 95% CI [0.51, 0.98]）。
+
+Ariadne（星號）是之後才設計的點，沒有用來算相關。
+
+（口頭補充、畫面上沒放：這是跨架構的相關，不是因果；N = 8、single seed；到 10k checkpoint 相關性降到 r ≈ 0.66。）
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s19_78da6554449e5541.mp4"
           >
+            <aside class="notes" data-markdown>
+**主結果**（口頭帶過）：20 個 image benchmark 平均 Full 40.92、Chunk 37.35、Ariadne 40.40 —— 離 full 只差 0.52，比 chunk 高 3.05。
+
+這頁是 22 個評測 benchmark 各自的分數差（Ariadne − Chunk），顏色代表類別，底下列出每一類包含哪些 benchmark：
+- 最大進步在 **需要跨區域整合證據** 的任務：V* 高解析度視覺搜尋 +11.0、DocVQA +9.8、OCRBench +8.9、InfoVQA +7.7、VLMs-are-Blind +7.2、CV-Bench +6.1。
+  —— 文件/OCR 需要把局部文字連到整頁 layout，chunk 隔離最傷。
+- Grounding（RefCOCO 系列）幾乎持平：主要是局部 phrase-region 匹配。
+- Chart 和 counting 小幅退步（ChartXiv-RQ −1.6、ChartQA −1.2、PixMo-Count −1.9）：精確幾何和 instance counting 可能需要額外的結構。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s19_680f4bd70056747d.mp4"
           >
+            <aside class="notes" data-markdown>
+回到開頭的熱圖，現在把 Ariadne 放進來：Ariadne 保留了和 full attention 類似的物體/背景分工，而 chunk window 沒有。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s20_e7141ed1b8f4cc22.mp4"
           >
+            <aside class="notes" data-markdown>
+效率（NVIDIA Hopper、FlashAttention-3、bf16）：
+- 896² 解析度（4096 tokens）：attention FLOPs 11.0T → 1.68T，**少 6.5 倍**。
+- Attention kernel：Full 24.6 ms、Chunk 17.5 ms、Ariadne 6.7 ms。有趣的是 SWA 比 chunk 還快 —— FA3 的 contiguous SWA kernel 比 chunk 用的 varlen 介面優化得更好，chunk 還要付 2D window reorder 的開銷。
+- End-to-end ViT：123.5 → 106.8 ms（−13.5%），因為 MLP 等其他部分不變。
+- Sink bias 零額外成本。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s20_08b5152b6981a18d.mp4"
           >
+            <aside class="notes" data-markdown>
+解析度越高，差距越大：full attention 是 quadratic，Ariadne 的 local 部分接近 linear。
+End-to-end 節省從 448² 的 −2.2%，到 896² 的 −13.5%，到 1792²（16k tokens）的 **−39.4%**。
+這正是 hybrid attention 要瞄準的高解析度區間。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s21_e223249153936e72.mp4"
           >
+            <aside class="notes" data-markdown>
+**Full + Sink 的矛盾**：它的 SHS 最高（.611），benchmark 卻比 Full 低 0.97。
+而 sink 加在其他三種 local attention 上都是正的（+0.59、+1.04、+1.34）。
+
+右邊是「sink 從每個 token 偷走多少 received attention」：
+- SWA 模型：背景 token 被偷 2.8–4.6%，物體 token 1.7–2.9%；94–97% 的 heads 從背景偷得比較多 → sink 是 background suppressor。
+- Full + sink：只偷了 0.38% / 0.23%，**幾乎沒在用**。
+- Chunk + sink：方向性只有 78%，比較不挑。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s21_9b95535d15bfc369.mp4"
           >
+            <aside class="notes" data-markdown>
+作者給的三個解釋：
+1. **Full attention 本來就有 implicit sink**：Guo et al. (2024) 的 active-dormant heads —— 有些 head 會把 attention 導向 value 接近 0 的 token，等於一個「依輸入而定的 no-op」。外加一個固定的 s_aux 是在跟它競爭，不是互補。
+2. **SWA 沒有這個機制**：128 token 的 window 太小，學不出 implicit sink；這時顯式 sink 補上了真正缺的東西。
+3. **過度專精**：Full + sink 有 82.3% 的 heads 變成 object-dominant（九個模型最高）→ 太多 head 擠去看前景，失去「背景專家」這個互補角色。SHS 升（個別 head 更專精）但 benchmark 降（整體分工變差）。
+
+這也顯示 **SHS 不是越高越好**，討論時可以拿出來。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s22_8c69630fe545df97.mp4"
           >
+            <aside class="notes" data-markdown>
+總結：
+1. 發現 SHS：full-attention ViT 的 heads 會分成物體/背景專家；SHS-Index 可以量化，並在 16 個開源模型上完全分開 full 與 chunk。
+2. 找出三個影響 SHS 的結構因素：window interaction、token serialization、local softmax allocation。
+3. SHS-Index 在控制實驗中和 benchmark 相關（r = 0.858），據此設計 Ariadne：20 image tasks 只輸 full 0.52，attention FLOPs 少 6.5×，高解析度 e2e 最多省 39%。
+</aside>
         </section>
         <section
           data-background-size='contain'
           data-background-color="white"
           data-background-video="shs_assets/s22_120836967f2dceea.mp4"
           >
+            <aside class="notes" data-markdown>
+**Limitations（作者列的）**：9 個架構都是同一個訓練設定、random-init ViT + Qwen2-0.5B、10k steps、單一 seed、單一 checkpoint；
+correlation 還沒在大 LLM、多 seed 上驗證；也沒有和所有 axial/stripe attention 從頭比較。
+
+**討論題（我自己的想法，可以拋給大家）**：
+Full+Sink 的 SHS 最高、benchmark 卻比 Full 差 —— 「最佳 SHS」是否存在？我們該優化的是單一 head 的專精程度，還是整體 head 角色的多樣性？
+</aside>
         </section>
         <section
           data-background-size='contain'
